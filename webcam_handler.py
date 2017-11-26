@@ -11,9 +11,9 @@ import threading
 import copy
 
 
-_region = 'westus' #Here you enter the region of your subscription
+_region = 'westus'
 _url = 'https://{}.api.cognitive.microsoft.com/emotion/v1.0/recognize'.format(_region)
-_key = 'd0bfdec61a7841609a35fda0c12d7788'
+_key = '823b722df60c4db7bb766c792079f29e'
 _maxNumRetries = 10
 _requestFrequency = 3.1
 
@@ -27,7 +27,12 @@ _global_edited_webcam_frame = None
 
 _players_array = None
 _players_override = None
-_persistent_faces = False
+_persistent_faces = True
+
+_winnerTime = 8
+_lastWin = 0
+
+_point_results = []
 
 def processRequest(json, data, headers, params):
 
@@ -75,11 +80,12 @@ def processRequest(json, data, headers, params):
         break
         
     return result
-    
+
+
 def BGR2RGB(array):
     return np.roll(array, 1, axis=-1)
             
-    
+# Compresses images from np.arrays to JPEGS to make queries to Cognitive API faster
 def nparrayToCompressedByteArray(array):
     
     array = BGR2RGB(array)
@@ -91,6 +97,7 @@ def nparrayToCompressedByteArray(array):
     raw_image.save(imgByteArr, format='JPEG')
     return imgByteArr.getvalue()
 
+# Image saving function
 def sv(array):
     
     array = BGR2RGB(array)
@@ -116,7 +123,8 @@ def sendRequest(array):
     result = processRequest( json, compressed, headers, params )
     
     return result
-    
+
+# Thread for sending requests to Cognitive Services
 def requestThread():
 
     global _lastRequestTime
@@ -132,9 +140,9 @@ def requestThread():
         _latest_response = sendRequest(_current_frame)
         print (_latest_response)
         
-        
-def drawFaceInfo(info, location, target):
-    neutralness = info['scores']['neutral']
+
+# Draws a rectangle on a face
+def drawFaceInfo(location, target):
     
     green = (0,255,0)
     #print(location)
@@ -142,7 +150,8 @@ def drawFaceInfo(info, location, target):
     x, y, w, h = location
     
     cv2.rectangle(target, (x, y), (x+w, y+h), green, 5)
-    
+
+# Draws a small np.array image onto a bigger one. Takes alpha channels into account.
 def drawImage(s_img, l_img, x_offset, y_offset):
     y1, y2 = y_offset, y_offset + s_img.shape[0]
     x1, x2 = x_offset, x_offset + s_img.shape[1]
@@ -156,7 +165,8 @@ def drawImage(s_img, l_img, x_offset, y_offset):
 
     for c in range(0, 3):
         l_img[y1:y2, x1:x2, c] = (alpha_s * s_img[:, :, c] + alpha_l * l_img[y1:y2, x1:x2, c])
-        
+
+# If somebody's state has been changed, it gets updated globally
 def updateNearestPlayer(location, emoji):
     x, y, w, h = location
     to_update = 0
@@ -168,6 +178,7 @@ def updateNearestPlayer(location, emoji):
 
     _players_override[to_update] = emoji
 
+# Draws the apt. emoji on the apt. person
 def drawEmoji(info, location, target, override_emoji=''):
         
     best = ('kek', -1)
@@ -175,12 +186,10 @@ def drawEmoji(info, location, target, override_emoji=''):
         if s > best[1]:
             best = (f, s)
     
-    #print(type(best[0]))
     emotion = best[0]
     if _persistent_faces and override_emoji != '':
         emotion = override_emoji
 
-    #print(type(best))
     if emotion == 'anger' or emotion == 'contempt' or emotion == 'disgust':
         emoji_raw = cv2.imread("angry_emoji.png", -1)
     elif emotion == 'fear' or emotion == 'surprise':
@@ -189,6 +198,8 @@ def drawEmoji(info, location, target, override_emoji=''):
         emoji_raw = cv2.imread("laughing_crying_emoji2.png", -1)
     elif emotion == 'sadness':
         emoji_raw = cv2.imread("sad_emoji.png", -1)
+    elif emotion == 'winner':
+        emoji_raw = cv2.imread('winner_emoji.png', -1)
     else:
         return ''
     
@@ -198,9 +209,12 @@ def drawEmoji(info, location, target, override_emoji=''):
     drawImage(emoji, target, x, y)
     return emotion
 
-        
+
+# Draws all the information we have about the frame (emojis, rects, etc.) on the frame
 def drawInfo(frame):
-        
+       
+    global _lastWin
+    global _players_array
     grayscale = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     
     face_locations = _face_cascade.detectMultiScale(grayscale, scaleFactor = 1.1, minNeighbors = 5, minSize=(30, 30), flags=cv2.CASCADE_SCALE_IMAGE)
@@ -210,36 +224,56 @@ def drawInfo(frame):
     tmp_response = sorted(tmp_response, key=lambda face: face['faceRectangle']['left'])
     
     face_locations = sorted(face_locations, key=lambda loc: loc[0])
+        
+    if len(face_locations) == len(_players_array):
+        _players_array = face_locations
     
-    #print(_players_array)
     for index in range(0, min(len(tmp_response), len(face_locations))):
         print(_players_override)
-        res = drawEmoji(tmp_response[index], face_locations[index], frame, _players_override[index])
-        if res != '':
+        if index >= len(_players_override):
+            kek = ''
+        else:
+            kek = _players_override[index]
+        res = drawEmoji(tmp_response[index], face_locations[index], frame, kek)
+        if res != '' and not 'winner' in _players_override:
             updateNearestPlayer(face_locations[index], res)
-
+            emptycnt = 0
+            lastIndex = -1
+            for i in range(0, len(_players_override)):
+                emptycnt += _players_override[i] == ""
+                if _players_override[i] == "":
+                    lastIndex = i
+            if emptycnt == 1:
+                _players_override[lastIndex] = 'winner'
+                _lastWin = time.time()
+                _point_results[lastIndex] += 1
+    
+        
+# Draws rectangles on top of all faces in the frame. Also assists with global variable initialization.
 def drawRects(frame):
         
     grayscale = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     
     face_locations = _face_cascade.detectMultiScale(grayscale, scaleFactor = 1.1, minNeighbors = 5, minSize=(30, 30), flags=cv2.CASCADE_SCALE_IMAGE)
 
-    tmp_response = _latest_response
+    #tmp_response = _latest_response
     
-    tmp_response = sorted(tmp_response, key=lambda face: face['faceRectangle']['left'])
+    #tmp_response = sorted(tmp_response, key=lambda face: face['faceRectangle']['left'])
     
     face_locations = sorted(face_locations, key=lambda loc: loc[0])
 
     global _players_array
     global _players_override
+    global _point_results
     _players_array = face_locations
+    _point_results = [0] * len(_players_array)
     _players_override = [''] * len(face_locations)
     print(_players_override)
     
-    for index in range(0, min(len(tmp_response), len(face_locations))):
-        drawFaceInfo(tmp_response[index], face_locations[index], frame)
+    for index in range(0, len(face_locations)):
+        drawFaceInfo(face_locations[index], frame)
 
-
+# Webcam Thread for dealing with the webcam and most game logic
 def webcamThread():
     
     global _global_edited_webcam_frame
@@ -254,7 +288,7 @@ def webcamThread():
         
         _global_edited_webcam_frame = edited_frame
     
-
+# Initial calibration
 def initialize():
     cap = cv2.VideoCapture(0)
     
@@ -265,10 +299,6 @@ def initialize():
     _face_cascade = cv2.CascadeClassifier(cascPath)
 
     _lastRequestTime = time.time()
-    
-    t = threading.Thread(target = requestThread)
-    t.setDaemon(True)
-    t.start()
 
     
     while(True):
@@ -282,6 +312,7 @@ def initialize():
     
         # Display the resulting frame
         cv2.imshow('edited_frame',_current_frame)
+        cv2.moveWindow('edited_frame', 0, 0)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
             
@@ -289,26 +320,29 @@ def initialize():
     # When everything done, release the capture
     cap.release()
     cv2.destroyAllWindows()
-
-
-def main():
-    initialize()
+    
+    
+def webcam_main():
+    #initialize()
 
     cap = cv2.VideoCapture(0)
-    videocap = cv2.VideoCapture('1.mp4')
     
     global _face_cascade
     global _current_frame
+    global _players_override
     
+    # Use cascade classifier for loal face position detection
     cascPath = "haarcascade_frontalface_default.xml"
     _face_cascade = cv2.CascadeClassifier(cascPath)
 
     _lastRequestTime = time.time()
     
+    # Create a thread for polling requests to the Cognitive Services API
     t = threading.Thread(target = requestThread)
     t.setDaemon(True)
     t.start()
     
+    # And one for polling the webcam
     webcam_thread = threading.Thread(target = webcamThread)
     webcam_thread.setDaemon(True)
     webcam_thread.start()
@@ -318,29 +352,49 @@ def main():
     while(True):
         # Capture frame-by-frame
         ret, _current_frame = cap.read()
-        ret, video_frame = videocap.read()
         
-    
-        # Our operations on the frame come here
+        # Operations on the frame come here
         
-        
+        # Cases where we have an edited frame and not
         if not _global_edited_webcam_frame is None:
-            color = cv2.resize(cv2.cvtColor(_global_edited_webcam_frame, cv2.IMREAD_COLOR), (0, 0), fx = 0.5, fy = 0.5)
-            drawImage(color, video_frame, 0, 0)
+            color = cv2.resize(cv2.cvtColor(_global_edited_webcam_frame, cv2.IMREAD_COLOR), (0, 0), fx=0.5, fy=0.5)
+        else:
+            color = np.zeros((320, 240))
         
+        # Case when there was a winner recently
+        if time.time() - _lastWin < _winnerTime:
+            for index in range(0, len(_players_array)):
+                x, y, w, h = _players_array[index]
+                x = x//2
+                y = y//2
+                w = w//2
+                h = h//2
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                cv2.putText(color,str(_point_results[index]),(x, y), font, 2,(255,255,255),2,cv2.LINE_AA)
+        # Case when next round is about to start
+        elif time.time() - _lastWin < _winnerTime + 1:
+            for i in range(0, len(_players_override)):
+                _players_override[i] = ''
     
         # Display the resulting frame
-        cv2.imshow('edited_frame',video_frame)
+        cv2.imshow('edited_frame',color)
+        cv2.moveWindow('edited_frame', 0, 0)
         if cv2.waitKey(16) & 0xFF == ord('q'):
             break
             
     
     # When everything done, release the capture
     cap.release()
-    videocap.release()
     cv2.destroyAllWindows()
 
+def createWebcamMainThread():
+    t = threading.Thread(target = webcam_main)
+    t.setDaemon(True)
+    t.start()
+    
+    
+    return t
 
-if __name__ == "__main__":
-    main()
 
+#if __name__ == "__main__":
+#    main()
